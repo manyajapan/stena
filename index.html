@@ -105,13 +105,13 @@
     color: var(--fg);
     transform-origin: center;
     will-change: transform;
-    transition: transform 720ms cubic-bezier(0.22, 1, 0.36, 1);
+    transition: transform 900ms cubic-bezier(0.22, 1, 0.36, 1);
   }
 
   .word > span { display: inline-block; }
 
   .word.is-new > span {
-    animation: word-in 660ms cubic-bezier(0.22, 1, 0.36, 1) both;
+    animation: word-in 700ms cubic-bezier(0.22, 1, 0.36, 1) both;
   }
 
   .word.is-bump > span {
@@ -229,7 +229,7 @@ window.WALL_CONFIG = {
   var totalWordsEl = document.getElementById('totalWords');
   var noteEl = document.getElementById('note');
 
-  /* ---------- код для входа ---------- */
+  /* ============ код для входа ============ */
 
   function drawQr() {
     if (CFG.customQr) {
@@ -240,8 +240,7 @@ window.WALL_CONFIG = {
     var n = rows.length;
     if (!n) { qrBox.innerHTML = ''; return; }
 
-    /* Белое поле вокруг кода — четыре квадратика, как требует стандарт.
-       Без него телефон может не считать код. */
+    /* Белое поле вокруг кода — четыре квадратика, как требует стандарт. */
     var quiet = 4;
     var total = n + quiet * 2;
     var cells = '';
@@ -261,7 +260,7 @@ window.WALL_CONFIG = {
 
   drawQr();
 
-  /* ---------- связь с базой ---------- */
+  /* ============ связь с базой ============ */
 
   function rpc(name, args, ms) {
     var ctl = new AbortController();
@@ -302,79 +301,7 @@ window.WALL_CONFIG = {
     noteEl.hidden = false;
   }
 
-  /* ---------- фигура, в которую собираются слова ---------- */
-
-  var SHAPE_PATH = 'M22 12 H78 A14 14 0 0 1 92 26 V52 A14 14 0 0 1 78 66 H60 '
-    + 'L46 86 L43 66 H22 A14 14 0 0 1 8 52 V26 A14 14 0 0 1 22 12 Z';
-  var SHAPE_VIEWBOX = 100;
-  var SHAPE_FILL = 0.82;
-
-  var mask = null;
-  var maskKey = '';
-
-  function buildMask(width, height) {
-    var cell = 9;
-    var cols = Math.max(1, Math.round(width / cell));
-    var rows = Math.max(1, Math.round(height / cell));
-
-    var canvas = document.createElement('canvas');
-    canvas.width = cols;
-    canvas.height = rows;
-    var ctx = canvas.getContext('2d');
-    if (!ctx) return null;
-
-    ctx.fillStyle = '#000';
-    var side = Math.min(cols * 0.98, rows * SHAPE_FILL);
-    var scale = side / SHAPE_VIEWBOX;
-    var ox = (cols - side) / 2;
-    var oy = (rows - side) / 2;
-
-    ctx.save();
-    ctx.translate(ox, oy);
-    ctx.scale(scale, scale);
-    ctx.fill(new Path2D(SHAPE_PATH));
-    ctx.restore();
-
-    var data = ctx.getImageData(0, 0, cols, rows).data;
-    var inside = new Uint8Array(cols * rows);
-    var anchors = [];
-    var sx = 0, sy = 0;
-
-    for (var r = 0; r < rows; r += 1) {
-      for (var c = 0; c < cols; c += 1) {
-        var idx = r * cols + c;
-        if (data[idx * 4 + 3] > 128) {
-          inside[idx] = 1;
-          var ax = (c + 0.5) * cell;
-          var ay = (r + 0.5) * cell;
-          anchors.push({ x: ax, y: ay });
-          sx += ax; sy += ay;
-        }
-      }
-    }
-    if (anchors.length < 12) return null;
-
-    var cx = sx / anchors.length;
-    var cy = sy / anchors.length;
-    anchors.sort(function (a, b) {
-      return (a.x - cx) * (a.x - cx) + (a.y - cy) * (a.y - cy)
-           - ((b.x - cx) * (b.x - cx) + (b.y - cy) * (b.y - cy));
-    });
-
-    return {
-      cell: cell, cols: cols, rows: rows, inside: inside, anchors: anchors,
-      box: { x: ox * cell, y: oy * cell, w: side * cell, h: side * cell }
-    };
-  }
-
-  function spreadOrder(count) {
-    var order = new Int32Array(count);
-    for (var j = 0; j < count; j += 1) {
-      var half = j >> 1;
-      order[j] = (j % 2 === 0) ? half : (count - 1 - half);
-    }
-    return order;
-  }
+  /* ============ размер текста ============ */
 
   var measureCanvas = document.createElement('canvas');
   var measureCtx = measureCanvas.getContext('2d');
@@ -386,66 +313,122 @@ window.WALL_CONFIG = {
     return measureCtx.measureText(text).width;
   }
 
-  /* ---------- раскладка: размер один для всех, слово не пропадает ---------- */
+  /* ============ область, внутри которой живут слова ============
+     Сейчас это круг. Когда понадобится другая фигура — логотип,
+     квадрат, облако — меняется только эта функция: она говорит,
+     где слову можно стоять и где его граница.                     */
 
-  function layout(words, m, size) {
-    var cell = m.cell, cols = m.cols, rows = m.rows, anchors = m.anchors, box = m.box;
-    var free = Uint8Array.from(m.inside);
-    var order = spreadOrder(anchors.length);
-    var placed = [];
-    var height = size * 1.06;
-    var halfH = height / 2;
-
-    var sorted = words.slice().sort(function (a, b) { return b.count - a.count; });
-
-    for (var w = 0; w < sorted.length; w += 1) {
-      var word = sorted[w];
-      var width = textWidth(word.display, size);
-      var halfW = width / 2;
-
-      var spot = null;
-      var crowded = null;
-
-      for (var k = 0; k < order.length; k += 1) {
-        var a = anchors[order[k]];
-        var x0 = a.x - halfW, y0 = a.y - halfH, x1 = a.x + halfW, y1 = a.y + halfH;
-        if (x0 < 0 || y0 < 0 || x1 > cols * cell || y1 > rows * cell) continue;
-
-        var c0 = Math.max(0, Math.floor(x0 / cell));
-        var c1 = Math.min(cols - 1, Math.floor((x1 - 0.01) / cell));
-        var r0 = Math.max(0, Math.floor(y0 / cell));
-        var r1 = Math.min(rows - 1, Math.floor((y1 - 0.01) / cell));
-
-        var taken = 0;
-        for (var r = r0; r <= r1; r += 1) {
-          var base = r * cols;
-          for (var c = c0; c <= c1; c += 1) if (!free[base + c]) taken += 1;
-        }
-
-        if (taken === 0) { spot = a; break; }
-        if (!crowded || taken < crowded.cost) crowded = { x: a.x, y: a.y, cost: taken };
-      }
-
-      var pick = spot || crowded || { x: box.x + box.w / 2, y: box.y + box.h / 2 };
-
-      var cc0 = Math.max(0, Math.floor((pick.x - halfW) / cell));
-      var cc1 = Math.min(cols - 1, Math.floor((pick.x + halfW - 0.01) / cell));
-      var rr0 = Math.max(0, Math.floor((pick.y - halfH) / cell));
-      var rr1 = Math.min(rows - 1, Math.floor((pick.y + halfH - 0.01) / cell));
-      for (var rr = rr0; rr <= rr1; rr += 1) {
-        var rb = rr * cols;
-        for (var ccn = cc0; ccn <= cc1; ccn += 1) free[rb + ccn] = 0;
-      }
-
-      placed.push({
-        norm: word.norm, display: word.display, count: word.count,
-        x: pick.x, y: pick.y, size: size
-      });
-    }
-    return placed;
+  function makeRegion(w, h) {
+    return {
+      cx: w / 2,
+      cy: h / 2,
+      R: Math.min(w * 0.78, h * 0.94) / 2
+    };
   }
 
-  /* ---------- отрисовка ---------- */
+  /* Насколько далеко угол слова от центра области. */
+  function cornerDist(box, region) {
+    var ex = Math.abs(box.x - region.cx) + box.hw;
+    var ey = Math.abs(box.y - region.cy) + box.hh;
+    return Math.sqrt(ex * ex + ey * ey);
+  }
+
+  /* ============ раскладка ============
+     Слова расставляются по кругу равномерно, как семечки в
+     подсолнухе: каждое следующее чуть дальше от центра и под новым
+     углом. Затем они мягко расталкиваются, чтобы не налезать друг
+     на друга. Когда слов становится много, вся стена одинаково
+     ужимается — размер по-прежнему один для всех.              */
+
+  function jitter(norm, size) {
+    var h = 2166136261;
+    for (var i = 0; i < norm.length; i += 1) {
+      h ^= norm.charCodeAt(i);
+      h = Math.imul(h, 16777619);
+    }
+    var angle = (((h >>> 0) % 1000) / 1000) * Math.PI * 2;
+    return { x: Math.cos(angle) * size, y: Math.sin(angle) * size };
+  }
+
+  function layoutWords(words, w, h, baseSize) {
+    var region = makeRegion(w, h);
+    var n = words.length;
+    if (!n) return [];
+
+    /* Порядок постоянный — по алфавиту. Поэтому повтор слова ничего
+       не сдвигает: двигаются только те, кого задел новичок. */
+    var ordered = words.slice().sort(function (a, b) {
+      if (a.norm < b.norm) return -1;
+      if (a.norm > b.norm) return 1;
+      return 0;
+    });
+
+    var fill = n <= 18 ? 1 : Math.max(0.5, Math.sqrt(18 / n));
+    var size = baseSize * fill;
+
+    var golden = Math.PI * (3 - Math.sqrt(5));
+    var boxes = [];
+
+    for (var i = 0; i < n; i += 1) {
+      var word = ordered[i];
+      var t = (i + 0.55) / n;
+      var rr = region.R * 0.74 * Math.sqrt(t);
+      var a = i * golden;
+      boxes.push({
+        norm: word.norm,
+        display: word.display,
+        count: word.count,
+        hw: textWidth(word.display, size) / 2,
+        hh: size * 0.53,
+        x: region.cx + Math.cos(a) * rr,
+        y: region.cy + Math.sin(a) * rr
+      });
+    }
+
+    var steps = n > 90 ? 70 : 140;
+    var push = 0.5;
+
+    for (var s = 0; s < steps; s += 1) {
+      for (var p = 0; p < boxes.length; p += 1) {
+        var A = boxes[p];
+        for (var q = p + 1; q < boxes.length; q += 1) {
+          var B = boxes[q];
+          var dx = B.x - A.x;
+          var dy = B.y - A.y;
+          var dist = Math.sqrt(dx * dx + dy * dy);
+          if (dist < 0.01) { dx = 1; dy = 0; dist = 0.01; }
+          var ux = dx / dist;
+          var uy = dy / dist;
+          var reach = (A.hw + B.hw) * Math.abs(ux)
+                    + (A.hh + B.hh) * Math.abs(uy) + 7;
+          var overlap = reach - dist;
+          if (overlap <= 0) continue;
+          var m = overlap * push / 2;
+          A.x -= ux * m; A.y -= uy * m;
+          B.x += ux * m; B.y += uy * m;
+        }
+      }
+
+      for (var k = 0; k < boxes.length; k += 1) {
+        var C = boxes[k];
+        var d = cornerDist(C, region);
+        if (d > region.R) {
+          var f = region.R / d;
+          C.x = region.cx + (C.x - region.cx) * f;
+          C.y = region.cy + (C.y - region.cy) * f;
+        }
+      }
+    }
+
+    return boxes.map(function (b) {
+      return {
+        norm: b.norm, display: b.display, count: b.count,
+        x: b.x, y: b.y, size: size
+      };
+    });
+  }
+
+  /* ============ отрисовка ============ */
 
   var seen = {};
   var nodes = {};
@@ -456,28 +439,13 @@ window.WALL_CONFIG = {
     });
   }
 
-  function hashOffset(norm) {
-    var h = 2166136261;
-    for (var i = 0; i < norm.length; i += 1) {
-      h ^= norm.charCodeAt(i);
-      h = Math.imul(h, 16777619);
-    }
-    var angle = (((h >>> 0) % 1000) / 1000) * Math.PI * 2;
-    var radius = 180 + ((h >>> 10) % 100);
-    return { x: Math.round(Math.cos(angle) * radius), y: Math.round(Math.sin(angle) * radius) };
-  }
-
   function render(words) {
     var w = arena.clientWidth;
     var h = arena.clientHeight;
     if (w < 80 || h < 80) return;
 
-    var key = w + 'x' + h;
-    if (maskKey !== key) { mask = buildMask(w, h); maskKey = key; }
-    if (!mask) return;
-
     var size = CFG.wordSize * Math.min(1.7, Math.max(0.5, h / 900));
-    var placed = layout(words, mask, size);
+    var placed = layoutWords(words, w, h, size);
 
     var fresh = {}, bumped = {};
     for (var i = 0; i < words.length; i += 1) {
@@ -498,7 +466,7 @@ window.WALL_CONFIG = {
         node = document.createElement('div');
         node.className = 'word';
         node.appendChild(document.createElement('span'));
-        var off = hashOffset(item.norm);
+        var off = jitter(item.norm, 220);
         node.style.setProperty('--ox', off.x + 'px');
         node.style.setProperty('--oy', off.y + 'px');
         arena.appendChild(node);
@@ -514,13 +482,14 @@ window.WALL_CONFIG = {
       }
 
       node.style.fontSize = item.size + 'px';
-      node.style.transform = 'translate3d(' + item.x + 'px, ' + item.y + 'px, 0) translate(-50%, -50%)';
+      node.style.transform = 'translate3d(' + item.x.toFixed(1) + 'px, '
+        + item.y.toFixed(1) + 'px, 0) translate(-50%, -50%)';
 
       if (fresh[item.norm]) {
         node.classList.add('is-new');
         setTimeout((function (n) {
           return function () { n.classList.remove('is-new'); };
-        })(node), 700);
+        })(node), 750);
       }
       if (bumped[item.norm]) {
         node.classList.add('is-bump');
@@ -538,10 +507,19 @@ window.WALL_CONFIG = {
     }
   }
 
-  /* ---------- обновление ---------- */
+  /* ============ обновление ============ */
 
   var frozen = false;
   var lastWords = [];
+  var lastSignature = '';
+
+  function signature(words) {
+    var parts = [];
+    for (var i = 0; i < words.length; i += 1) {
+      parts.push(words[i].norm + ':' + words[i].count);
+    }
+    return parts.join('|');
+  }
 
   function refresh() {
     rpc('wall_state', {}, 7000).then(function (result) {
@@ -555,7 +533,14 @@ window.WALL_CONFIG = {
 
       frozen = !!data.frozen;
       lastWords = data.words || [];
-      if (!frozen) render(lastWords);
+
+      /* Пересобираем картину только когда список слов изменился,
+         иначе стена дёргалась бы каждую секунду. */
+      var sig = signature(lastWords);
+      if (!frozen && sig !== lastSignature) {
+        lastSignature = sig;
+        render(lastWords);
+      }
     });
   }
 
@@ -565,11 +550,10 @@ window.WALL_CONFIG = {
     refresh();
   });
 
-  /* Обновляемся раз в секунду: этого достаточно, чтобы слово
-     появлялось на глазах у того, кто его отправил. */
   setInterval(refresh, 1000);
 
   window.addEventListener('resize', function () {
+    lastSignature = '';
     if (!frozen) render(lastWords);
   });
 })();
